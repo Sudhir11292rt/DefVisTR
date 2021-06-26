@@ -61,7 +61,7 @@ python -m torch.distributed.launch --nproc_per_node=8 --use_env main.py --backbo
 ### Inference
 
 ```
-python inference.py --masks --model_path /path/to/model_weights --save_path /path/to/results.json
+python inference.py --masks --model_path /mnt/data/exps/r50_def_enc_VisTR/checkpoint0059.pth --save_path /mnt/data/exps/results --img_path /mnt/data/ytvis/valid/JPEGImages/ --ann_path /mnt/data/ytvis/valid_vis_codelab.json  --backbone resnet50
 ```
 
 ### Models
