@@ -51,17 +51,19 @@ Download the pretrained DETR models [Google Drive](https://drive.google.com/driv
 
 ### Training
 
-Training of the model requires at least 32g memory GPU, we performed the experiment on 32g V100 card. （As the training resolution is limited by the GPU memory, if you have a larger memory GPU and want to perform the experiment, please contact with me, thanks very much)
+Training of the model requires 4 GPU cards with each 15GB.
 
-To train baseline VisTR on a single node with 8 gpus for 18 epochs, run:
+To train baseline VisTR on a single node with 4 gpus for 60 epochs (Bsz 1), trains in 1 day 10:28 hrs:
 ```
 python -m torch.distributed.launch --nproc_per_node=8 --use_env main.py --backbone resnet101/50 --ytvos_path /path/to/ytvos --masks --pretrained_weights /path/to/pretrained_path
 ```
-
+```
+python -m torch.distributed.launch --nproc_per_node=4 --use_env main.py --backbone resnet50 --ytvos_path /mnt/data/ytvis/ --masks --pretrained_weights ../VisTR/384_coco_r50.pth
+```
 ### Inference
 
 ```
-python inference.py --masks --model_path /path/to/model_weights --save_path /path/to/results.json
+python inference.py --masks --model_path /mnt/data/exps/r50_def_enc_VisTR/checkpoint0059.pth --save_path /mnt/data/exps/results.json --img_path /mnt/data/ytvis/valid/JPEGImages/ --ann_path /mnt/data/ytvis/valid_vis_codelab.json  --backbone resnet50
 ```
 
 ### Models
