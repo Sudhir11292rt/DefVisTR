@@ -48,7 +48,13 @@ VisTR
 
 Download the pretrained DETR models [Google Drive](https://drive.google.com/drive/folders/1DlN8uWHT2WaKruarGW2_XChhpZeI9MFG?usp=sharing) [BaiduYun](https://pan.baidu.com/s/12omUNDRjhAeGZ5olqQPpHA)(passcode:alge) on COCO and save it to the pretrained path.
 
-
+### Compile CUDA operators
+```
+cd ./models/ops
+sh ./make.sh
+# unit test (should see all checking is True)
+python test.py
+```
 ### Training
 
 Training of the model requires 4 GPU cards with each 15GB.
