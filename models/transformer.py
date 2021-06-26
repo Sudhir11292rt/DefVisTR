@@ -13,7 +13,9 @@ from typing import Optional, List
 import torch
 import torch.nn.functional as F
 from torch import nn, Tensor
-
+from torch.utils import checkpoint
+from .deformable_transformer import DeformableTransformerEncoderLayer, DeformableTransformerEncoder
+from models.ops.modules import MSDeformAttn
 
 class Transformer(nn.Module):
 
@@ -22,11 +24,23 @@ class Transformer(nn.Module):
                  activation="relu", normalize_before=False,
                  return_intermediate_dec=False):
         super().__init__()
+        self.d_model = d_model
+        self.nhead = nhead
+        self.two_stage = False
+        self.two_stage_num_proposals = 300
+        dec_n_points=8
+        enc_n_points=6
+        dropout = 0.1
+        num_feature_levels = 36
+        encoder_layer = DeformableTransformerEncoderLayer(d_model, dim_feedforward,
+                                                          dropout, activation,
+                                                          num_feature_levels, nhead, enc_n_points)
+        self.encoder = DeformableTransformerEncoder(encoder_layer, num_encoder_layers)
 
-        encoder_layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward,
-                                                dropout, activation, normalize_before)
-        encoder_norm = nn.LayerNorm(d_model) if normalize_before else None
-        self.encoder = TransformerEncoder(encoder_layer, num_encoder_layers, encoder_norm)
+        # encoder_layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward,
+        #                                         dropout, activation, normalize_before)
+        # encoder_norm = nn.LayerNorm(d_model) if normalize_before else None
+        # self.encoder = TransformerEncoder(encoder_layer, num_encoder_layers, encoder_norm)
 
         decoder_layer = TransformerDecoderLayer(d_model, nhead, dim_feedforward,
                                                 dropout, activation, normalize_before)
@@ -43,17 +57,43 @@ class Transformer(nn.Module):
         for p in self.parameters():
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
+        for m in self.modules():
+            if isinstance(m, MSDeformAttn):
+                m._reset_parameters()
 
-    def forward(self, src, mask, query_embed, pos_embed):
+    def get_valid_ratio(self, mask):
+        #print(f'mask {mask.shape}')
+        _, H, W = mask.shape
+        valid_H = torch.sum(~mask[:, :, 0], 1)
+        valid_W = torch.sum(~mask[:, 0, :], 1)
+        valid_ratio_h = valid_H.float() / H
+        valid_ratio_w = valid_W.float() / W
+        valid_ratio = torch.stack([valid_ratio_w, valid_ratio_h], -1)
+        return valid_ratio
+
+    def forward(self, src, mask, query_embed, pos_embed, mask_):
         # flatten NxCxHxW to HWxNxC
+        _, s_h, s_w = mask_.shape
+        #print(f'mask_ {mask_.shape}')
+        spatial_shapes = []
+        masks_ = []
+        for idd in range(36) :
+            spatial_shapes.append((s_h,s_w))
+            #print(f'mask_[idd] {mask_[idd].unsqueeze(0).shape}')
+            masks_.append(mask_[idd].unsqueeze(0))
+
         bs, c, h, w = src.shape
         src = src.flatten(2).permute(2, 0, 1)
         pos_embed = pos_embed.flatten(2).permute(2, 0, 1)
-        query_embed = query_embed.unsqueeze(1).repeat(1, bs, 1)
+        query_embed = query_embed.unsqueeze(1).repeat(1, bs, 1) #query_embed.unsqueeze(1).repeat(1, bs, 1)
         mask = mask.flatten(1)
+        spatial_shapes = torch.as_tensor(spatial_shapes, dtype=torch.long, device=src.device)
+        level_start_index = torch.cat((spatial_shapes.new_zeros((1, )), spatial_shapes.prod(1).cumsum(0)[:-1]))
+        valid_ratios = torch.stack([self.get_valid_ratio(m) for m in masks_], 1)
 
         tgt = torch.zeros_like(query_embed)
-        memory = self.encoder(src, src_key_padding_mask=mask, pos=pos_embed)
+        memory = self.encoder(src.permute(1,0,2), spatial_shapes, level_start_index, valid_ratios, pos_embed.permute(1,0,2), mask) #self.encoder(src, src_key_padding_mask=mask, pos=pos_embed)
+        memory = memory.permute(1,0,2)
         hs = self.decoder(tgt, memory, memory_key_padding_mask=mask,
                           pos=pos_embed, query_pos=query_embed)
         return hs.transpose(1, 2), memory.permute(1, 2, 0).view(bs, c, h, w)
@@ -74,8 +114,9 @@ class TransformerEncoder(nn.Module):
         output = src
 
         for layer in self.layers:
-            output = layer(output, src_mask=mask,
-                           src_key_padding_mask=src_key_padding_mask, pos=pos)
+            '''output = layer(output, src_mask=mask,
+                           src_key_padding_mask=src_key_padding_mask, pos=pos)'''
+            output = checkpoint.checkpoint(layer, output, mask, src_key_padding_mask, pos)
 
         if self.norm is not None:
             output = self.norm(output)
@@ -104,11 +145,12 @@ class TransformerDecoder(nn.Module):
         intermediate = []
 
         for layer in self.layers:
-            output = layer(output, memory, tgt_mask=tgt_mask,
+            '''output = layer(output, memory, tgt_mask=tgt_mask,
                            memory_mask=memory_mask,
                            tgt_key_padding_mask=tgt_key_padding_mask,
                            memory_key_padding_mask=memory_key_padding_mask,
-                           pos=pos, query_pos=query_pos)
+                           pos=pos, query_pos=query_pos)'''
+            output = checkpoint.checkpoint(layer, output, memory, tgt_mask, memory_mask, tgt_key_padding_mask, memory_key_padding_mask,pos, query_pos )
             if self.return_intermediate:
                 intermediate.append(self.norm(output))
 

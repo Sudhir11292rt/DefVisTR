@@ -21,7 +21,12 @@ if float(torchvision.__version__[:3]) < 0.7:
     from torchvision.ops import _new_empty_tensor
     from torchvision.ops.misc import _output_size
 
-
+def inverse_sigmoid(x, eps=1e-5):
+    x = x.clamp(min=0, max=1)
+    x1 = x.clamp(min=eps)
+    x2 = (1 - x).clamp(min=eps)
+    return torch.log(x1/x2)
+    
 class SmoothedValue(object):
     """Track a series of values and provide access to smoothed values over a
     window or the global series average.

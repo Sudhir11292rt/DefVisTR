@@ -1,0 +1,6 @@
+datasets/__pycache__/*
+models/__pycache__/*
+models/ops/*
+util/__pycache__/*
+models/dcn/*
+__pycache__/*

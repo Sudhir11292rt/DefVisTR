@@ -26,8 +26,8 @@ def get_args_parser():
     parser.add_argument('--lr_backbone', default=1e-5, type=float)
     parser.add_argument('--batch_size', default=1, type=int)
     parser.add_argument('--weight_decay', default=1e-4, type=float)
-    parser.add_argument('--epochs', default=18, type=int)
-    parser.add_argument('--lr_drop', default=12, type=int)
+    parser.add_argument('--epochs', default=60, type=int)
+    parser.add_argument('--lr_drop', default=40, type=int)
     parser.add_argument('--clip_max_norm', default=0.1, type=float,
                         help='gradient clipping max norm')
 
@@ -88,7 +88,7 @@ def get_args_parser():
     parser.add_argument('--ytvos_path', type=str)
     parser.add_argument('--remove_difficult', action='store_true')
 
-    parser.add_argument('--output_dir', default='r101_vistr',
+    parser.add_argument('--output_dir', default='/mnt/data/exps/r50_def_enc_VisTR',
                         help='path where to save, empty for no saving')
     parser.add_argument('--device', default='cuda',
                         help='device to use for training / testing')
@@ -160,7 +160,11 @@ def main(args):
     del checkpoint["vistr.class_embed.weight"]
     del checkpoint["vistr.class_embed.bias"]
     del checkpoint["vistr.query_embed.weight"]
-    model.module.load_state_dict(checkpoint,strict=False)
+    missing_keys, unexpected_keys = model.module.load_state_dict(checkpoint,strict=False)
+    if len(missing_keys) > 0:
+        print('Missing Keys: {}'.format(missing_keys))
+    if len(unexpected_keys) > 0:
+        print('Unexpected Keys: {}'.format(unexpected_keys))
 
     if args.resume:
         if args.resume.startswith('https'):
@@ -186,7 +190,7 @@ def main(args):
         if args.output_dir:
             checkpoint_paths = [output_dir / 'checkpoint.pth']
             # extra checkpoint before LR drop and every epochs
-            if (epoch + 1) % args.lr_drop == 0 or (epoch + 1) % 1 == 0:
+            if (epoch + 1) % args.lr_drop == 0 or (epoch + 1) % 5 == 0:
                 checkpoint_paths.append(output_dir / f'checkpoint{epoch:04}.pth')
             for checkpoint_path in checkpoint_paths:
                 utils.save_on_master({

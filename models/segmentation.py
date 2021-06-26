@@ -87,13 +87,14 @@ class VisTRsegm(nn.Module):
         bs = features[-1].tensors.shape[0]
         src, mask = features[-1].decompose()
         assert mask is not None
+        mask_ = mask
         src_proj = self.vistr.input_proj(src)
         n,c,s_h,s_w = src_proj.shape
         bs_f = bs//self.vistr.num_frames
         src_proj = src_proj.reshape(bs_f, self.vistr.num_frames,c, s_h, s_w).permute(0,2,1,3,4).flatten(-2)
         mask = mask.reshape(bs_f, self.vistr.num_frames, s_h*s_w)
         pos = pos[-1].permute(0,2,1,3,4).flatten(-2)
-        hs, memory = self.vistr.transformer(src_proj, mask, self.vistr.query_embed.weight, pos)
+        hs, memory = self.vistr.transformer(src_proj, mask, self.vistr.query_embed.weight, pos, mask_)
         outputs_class = self.vistr.class_embed(hs)
         outputs_coord = self.vistr.bbox_embed(hs).sigmoid()
         out = {"pred_logits": outputs_class[-1], "pred_boxes": outputs_coord[-1]}

@@ -59,7 +59,7 @@ class HungarianMatcher(nn.Module):
             out_i, tgt_i = linear_sum_assignment(cost.cpu())
             index_i,index_j = [],[]
             for j in range(len(out_i)):
-                tgt_valid_ind_j = tgt_valid_split[j].nonzero().flatten()
+                tgt_valid_ind_j = tgt_valid_split[tgt_i[j]].nonzero().flatten()
                 index_i.append(tgt_valid_ind_j*num_out + out_i[j])
                 index_j.append(tgt_valid_ind_j + tgt_i[j]* self.num_frames)
             if index_i==[] or index_j==[]:
