@@ -2,7 +2,7 @@ import torch.utils.data
 import torchvision
 
 from .coco import build as build_coco
-from .ytvos import build as build_ytvos
+from .ytvos_ref import build as build_ytvos
 
 def get_coco_api_from_dataset(dataset):
     for _ in range(10):

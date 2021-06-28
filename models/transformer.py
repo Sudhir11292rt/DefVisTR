@@ -16,22 +16,28 @@ from torch import nn, Tensor
 from torch.utils import checkpoint
 from .deformable_transformer import DeformableTransformerEncoderLayer, DeformableTransformerEncoder
 from models.ops.modules import MSDeformAttn
+from transformers import RobertaModel, RobertaTokenizerFast
 
 class Transformer(nn.Module):
 
     def __init__(self, d_model=512, nhead=8, num_encoder_layers=6,
                  num_decoder_layers=6, dim_feedforward=2048, dropout=0.1,
                  activation="relu", normalize_before=False,
-                 return_intermediate_dec=False):
+                 return_intermediate_dec=False, freeze_text_encoder = True, ref_exp=True):
         super().__init__()
         self.d_model = d_model
         self.nhead = nhead
         self.two_stage = False
         self.two_stage_num_proposals = 300
+        self.ref_exp = ref_exp
         dec_n_points=8
         enc_n_points=6
         dropout = 0.1
         num_feature_levels = 36
+
+        if ref_exp :
+            num_feature_levels = num_feature_levels + 1
+
         encoder_layer = DeformableTransformerEncoderLayer(d_model, dim_feedforward,
                                                           dropout, activation,
                                                           num_feature_levels, nhead, enc_n_points)
@@ -49,6 +55,22 @@ class Transformer(nn.Module):
                                           return_intermediate=return_intermediate_dec)
 
         self._reset_parameters()
+
+        if ref_exp :
+            self.tokenizer = RobertaTokenizerFast.from_pretrained('roberta-base')
+            self.text_encoder = RobertaModel.from_pretrained('roberta-base')
+
+            if freeze_text_encoder:
+                for p in self.text_encoder.parameters():
+                    p.requires_grad_(False)
+
+            self.expander_dropout = 0.1
+            txt_input_hidden_size = 768
+            self.resizer = FeatureResizer(
+                input_feat_size=txt_input_hidden_size,
+                output_feat_size=d_model,
+                dropout=self.expander_dropout,
+            )
 
         self.d_model = d_model
         self.nhead = nhead
@@ -71,7 +93,7 @@ class Transformer(nn.Module):
         valid_ratio = torch.stack([valid_ratio_w, valid_ratio_h], -1)
         return valid_ratio
 
-    def forward(self, src, mask, query_embed, pos_embed, mask_):
+    def forward(self, src, mask, query_embed, pos_embed, mask_, exps_input_ids=None, exps_attn_masks=None):
         # flatten NxCxHxW to HWxNxC
         _, s_h, s_w = mask_.shape
         #print(f'mask_ {mask_.shape}')
@@ -79,7 +101,7 @@ class Transformer(nn.Module):
         masks_ = []
         for idd in range(36) :
             spatial_shapes.append((s_h,s_w))
-            #print(f'mask_[idd] {mask_[idd].unsqueeze(0).shape}')
+            #print(f'mask_[idd] {mask_[idd].unsqueeze(0).shape}') #mask_[idd] torch.Size([1, 10, 13])
             masks_.append(mask_[idd].unsqueeze(0))
 
         bs, c, h, w = src.shape
@@ -87,6 +109,28 @@ class Transformer(nn.Module):
         pos_embed = pos_embed.flatten(2).permute(2, 0, 1)
         query_embed = query_embed.unsqueeze(1).repeat(1, bs, 1) #query_embed.unsqueeze(1).repeat(1, bs, 1)
         mask = mask.flatten(1)
+
+        if self.ref_exp :
+            device = src.device
+            #print(f'exps_input_ids {exps_input_ids.shape} exps_attn_masks {exps_attn_masks.shape}') exps_input_ids torch.Size([1, 20]) exps_attn_masks torch.Size([1, 20])
+            tokenized = {"input_ids":(exps_input_ids.to(device)), "attention_mask":exps_attn_masks.to(device)}
+            #print(f'tokenized {tokenized}')
+            encoded_text = self.text_encoder(**tokenized)
+            #print(f'encoded_text {encoded_text.last_hidden_state.shape}') encoded_text torch.Size([1, 20, 768])
+            text_memory = encoded_text.last_hidden_state.transpose(0, 1)
+            #print(f'text_memory {text_memory.shape}') #text_memory torch.Size([20, 1, 768])
+            text_attention_mask = tokenized['attention_mask'].ne(1).bool()
+            #print(f'text_attention_mask {text_attention_mask.shape}') # text_attention_mask torch.Size([1, 20])
+            text_memory_resized = self.resizer(text_memory) #text_memory_resized torch.Size([20, 1, 384])
+            #print(f'src {src.shape} mask {mask.shape} pos_embed {pos_embed.shape}') src torch.Size([4680, 1, 384]) mask torch.Size([1, 4680]) pos_embed torch.Size([4680, 1, 384])
+            src = torch.cat([src, text_memory_resized], dim=0)
+            mask = torch.cat([mask, text_attention_mask], dim=1)
+            pos_embed = torch.cat([pos_embed, torch.zeros_like(text_memory_resized)], dim=0)
+
+            for idd in range(exps_input_ids.shape[0]) :
+                spatial_shapes.append((exps_input_ids.shape[0],exps_input_ids.shape[1]))
+                masks_.append(exps_attn_masks.unsqueeze(0))
+
         spatial_shapes = torch.as_tensor(spatial_shapes, dtype=torch.long, device=src.device)
         level_start_index = torch.cat((spatial_shapes.new_zeros((1, )), spatial_shapes.prod(1).cumsum(0)[:-1]))
         valid_ratios = torch.stack([self.get_valid_ratio(m) for m in masks_], 1)
@@ -96,6 +140,10 @@ class Transformer(nn.Module):
         memory = memory.permute(1,0,2)
         hs = self.decoder(tgt, memory, memory_key_padding_mask=mask,
                           pos=pos_embed, query_pos=query_embed)
+        #print(f'memory {memory.shape}') memory torch.Size([4680, 1, 384])
+        if self.ref_exp :
+            memory = memory[:-text_memory_resized.shape[0],:,:]
+        #print(f'memory {memory.shape}') #memory torch.Size([4680, 1, 384])
         return hs.transpose(1, 2), memory.permute(1, 2, 0).view(bs, c, h, w)
 
 
@@ -309,6 +357,27 @@ class TransformerDecoderLayer(nn.Module):
                                     tgt_key_padding_mask, memory_key_padding_mask, pos, query_pos)
         return self.forward_post(tgt, memory, tgt_mask, memory_mask,
                                  tgt_key_padding_mask, memory_key_padding_mask, pos, query_pos)
+
+class FeatureResizer(nn.Module):
+    """
+    This class takes as input a set of embeddings of dimension C1 and outputs a set of
+    embedding of dimension C2, after a linear transformation, dropout and normalization (LN).
+    """
+
+    def __init__(self, input_feat_size, output_feat_size, dropout, do_ln=True):
+        super().__init__()
+        self.do_ln = do_ln
+        # Object feature encoding
+        self.fc = nn.Linear(input_feat_size, output_feat_size, bias=True)
+        self.layer_norm = nn.LayerNorm(output_feat_size, eps=1e-12)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, encoder_features):
+        x = self.fc(encoder_features)
+        if self.do_ln:
+            x = self.layer_norm(x)
+        output = self.dropout(x)
+        return output
 
 
 def _get_clones(module, N):

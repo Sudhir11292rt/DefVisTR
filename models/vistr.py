@@ -44,7 +44,7 @@ class VisTR(nn.Module):
         self.backbone = backbone
         self.aux_loss = aux_loss
 
-    def forward(self, samples: NestedTensor):
+    def forward(self, samples: NestedTensor, exps_input_ids=None, exps_attn_masks=None):
         """ The forward expects a NestedTensor, which consists of:
                - samples.tensors: image sequences, of shape [num_frames x 3 x H x W]
                - samples.mask: a binary mask of shape [num_frames x H x W], containing 1 on padded pixels

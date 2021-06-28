@@ -15,15 +15,17 @@ from PIL import Image
 from random import randint
 import cv2
 import random
+from transformers import RobertaTokenizerFast
+import json
 
 class YTVOSDataset:
-    def __init__(self, img_folder, ann_file, transforms, return_masks, num_frames):
+    def __init__(self, img_folder, ann_file, ann_to_exp_path, transforms, return_masks,tokenizer, num_frames):
         self.img_folder = img_folder
         self.ann_file = ann_file
         self._transforms = transforms
         self.return_masks = return_masks
         self.num_frames = num_frames
-        self.prepare = ConvertCocoPolysToMask(return_masks)
+        self.prepare = ConvertCocoPolysToMask(return_masks, tokenizer=tokenizer)
         self.ytvos = YTVOS(ann_file)
         self.cat_ids = self.ytvos.getCatIds()
         self.vid_ids = self.ytvos.getVidIds()
@@ -34,8 +36,12 @@ class YTVOSDataset:
             self.vid_infos.append(info)
         self.img_ids = []
         for idx, vid_info in enumerate(self.vid_infos):
-            for frame_id in range(len(vid_info['filenames'])):
-                self.img_ids.append((idx, frame_id))
+            frame_id = random.randint(0,len(vid_info['filenames'])-1)#for frame_id in range(len(vid_info['filenames'])):
+            self.img_ids.append((idx, frame_id))
+        if ann_to_exp_path is not None :
+            #print(f'ann_to_exp_path {ann_to_exp_path}')
+            with open(ann_to_exp_path) as f:
+                self.ann_to_exp = json.load(f)
     def __len__(self):
         return len(self.img_ids)
 
@@ -54,10 +60,11 @@ class YTVOSDataset:
         ann_ids = self.ytvos.getAnnIds(vidIds=[vid_id])
         target = self.ytvos.loadAnns(ann_ids)
         target = {'image_id': idx, 'video_id': vid, 'frame_id': frame_id, 'annotations': target}
-        target = self.prepare(img[0], target, inds, self.num_frames)
+        target = self.prepare(img[0], target, inds, self.num_frames, self.ann_to_exp)
         if self._transforms is not None:
             img, target = self._transforms(img, target)
-        return torch.cat(img,dim=0), target
+        #print(f'img {img.shape}')
+        return torch.cat(img,dim=0), target, target["exps_input_ids"].unsqueeze(0), target["exps_attn_masks"].unsqueeze(0)
 
 
 def convert_coco_poly_to_mask(segmentations, height, width):
@@ -81,10 +88,12 @@ def convert_coco_poly_to_mask(segmentations, height, width):
 
 
 class ConvertCocoPolysToMask(object):
-    def __init__(self, return_masks=False):
+    def __init__(self, return_masks=False, tokenizer=None):
         self.return_masks = return_masks
+        self.tokenizer = tokenizer
+        self.max_tokens = 20
 
-    def __call__(self, image, target, inds, num_frames):
+    def __call__(self, image, target, inds, num_frames, ann_to_exp):
         w, h = image.size
         image_id = target["image_id"]
         frame_id = target['frame_id']
@@ -98,9 +107,17 @@ class ConvertCocoPolysToMask(object):
         area = []
         iscrowd = []
         valid = []
+        expressions = []
+        exps_tokens = []
+        exps_input_ids = []
+        exps_attn_masks = []
         # add valid flag for bboxes
+        
         for i, ann in enumerate(anno):
+            exp_length = len(ann_to_exp[str(ann['id'])])
+            exp = ann_to_exp[str(ann['id'])][0]
             for j in range(num_frames):
+                
                 bbox = ann['bboxes'][frame_id-inds[j]]
                 areas = ann['areas'][frame_id-inds[j]]
                 segm = ann['segmentations'][frame_id-inds[j]]
@@ -119,6 +136,43 @@ class ConvertCocoPolysToMask(object):
                 segmentations.append(segm)
                 classes.append(clas)
                 iscrowd.append(crowd)
+                expressions.append(exp)
+                exps_tokens.append(self.tokenizer(exp, return_tensors="pt"))
+                attention_mask = [0] * self.max_tokens
+                padded_input_ids = [0] * self.max_tokens
+                tokenized = self.tokenizer(exp)
+                token_len = min(len(tokenized["input_ids"]), self.max_tokens-1)
+                padded_input_ids[:token_len] = tokenized["input_ids"][:token_len]
+                attention_mask[:token_len] = tokenized["attention_mask"][:token_len]
+                #print(f'padded_input_ids {len(tokenized["input_ids"])} {len(padded_input_ids)}')
+                exps_input_ids.append(torch.tensor(padded_input_ids).unsqueeze(0))
+                #print(f'torch.tensor(padded_input_ids).unsqueeze(0) {torch.tensor(padded_input_ids).unsqueeze(0).shape}')
+                exps_attn_masks.append(torch.tensor(attention_mask).unsqueeze(0))
+                
+                
+        #print(f'len(anno) {len(anno)} len(expressions) {len(expressions)}')
+        exp_ct = len(expressions)
+        if exp_ct > 12 :
+            print(expressions)
+        while(1) :
+            if exp_ct >= 12 :
+                break
+            exp = ""
+            expressions.append(exp)
+            exps_tokens.append(self.tokenizer(exp, return_tensors="pt"))
+            attention_mask = [0] * self.max_tokens
+            padded_input_ids = [0] * self.max_tokens
+            tokenized = self.tokenizer(exp)
+            token_len = min(len(tokenized["input_ids"]), self.max_tokens)
+            padded_input_ids[:token_len] = tokenized["input_ids"][:token_len]
+            attention_mask[:token_len] = tokenized["attention_mask"][:token_len]
+            exps_input_ids.append(torch.tensor(padded_input_ids).unsqueeze(0))
+            exps_attn_masks.append(torch.tensor(attention_mask).unsqueeze(0))
+            #print(f'torch.tensor(padded_input_ids).unsqueeze(0) {torch.tensor(padded_input_ids).unsqueeze(0).shape}')
+            exp_ct = exp_ct + 1
+
+        #expressions = expressions + [""]*(left_ct-randint) 
+        #exps_tokens
         # guard against no boxes via resizing
         boxes = torch.as_tensor(boxes, dtype=torch.float32).reshape(-1, 4)
         boxes[:, 2:] += boxes[:, :2]
@@ -138,6 +192,13 @@ class ConvertCocoPolysToMask(object):
         area = torch.tensor(area) 
         iscrowd = torch.tensor(iscrowd)
         target["valid"] = torch.tensor(valid)
+        #target["expressions"] = expressions
+        #target["exps_tokens"] = exps_tokens
+
+
+        target["exps_input_ids"] = torch.cat(exps_input_ids, dim=0)
+
+        target["exps_attn_masks"] = torch.cat(exps_attn_masks, dim=0)
         target["area"] = area
         target["iscrowd"] = iscrowd
         target["orig_size"] = torch.as_tensor([int(h), int(w)])
@@ -183,9 +244,10 @@ def build(image_set, args):
     assert root.exists(), f'provided YTVOS path {root} does not exist'
     mode = 'instances'
     PATHS = {
-        "train": (root / "train/JPEGImages", root / "annotations" / f'{mode}_train_sub.json'),
-        "val": (root / "valid/JPEGImages", root / "annotations" / f'{mode}_val_sub.json'),
+        "train": (root / "train/JPEGImages", root / "annotations" / f'{mode}_train_sub.json', root / "ann_id_to_exp.json"),
+        "val": (root / "valid/JPEGImages", root / "annotations" / f'{mode}_val_sub.json', None),
     }
-    img_folder, ann_file = PATHS[image_set]
-    dataset = YTVOSDataset(img_folder, ann_file, transforms=make_coco_transforms(image_set), return_masks=args.masks, num_frames = args.num_frames)
+    img_folder, ann_file, actual_ann_file = PATHS[image_set]
+    tokenizer = RobertaTokenizerFast.from_pretrained('roberta-base')
+    dataset = YTVOSDataset(img_folder, ann_file, actual_ann_file, transforms=make_coco_transforms(image_set), return_masks=args.masks, tokenizer=tokenizer, num_frames = args.num_frames)
     return dataset

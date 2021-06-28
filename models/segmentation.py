@@ -80,7 +80,7 @@ class VisTRsegm(nn.Module):
                                 nn.GroupNorm(4,12),
                                 nn.ReLU(),
                                 nn.Conv3d(12,1,1))
-    def forward(self, samples: NestedTensor):
+    def forward(self, samples: NestedTensor, exps_input_ids=None, exps_attn_masks=None):
         if not isinstance(samples, NestedTensor):
             samples = nested_tensor_from_tensor_list(samples)
         features, pos = self.vistr.backbone(samples)
@@ -94,7 +94,7 @@ class VisTRsegm(nn.Module):
         src_proj = src_proj.reshape(bs_f, self.vistr.num_frames,c, s_h, s_w).permute(0,2,1,3,4).flatten(-2)
         mask = mask.reshape(bs_f, self.vistr.num_frames, s_h*s_w)
         pos = pos[-1].permute(0,2,1,3,4).flatten(-2)
-        hs, memory = self.vistr.transformer(src_proj, mask, self.vistr.query_embed.weight, pos, mask_)
+        hs, memory = self.vistr.transformer(src_proj, mask, self.vistr.query_embed.weight, pos, mask_, exps_input_ids, exps_attn_masks)
         outputs_class = self.vistr.class_embed(hs)
         outputs_coord = self.vistr.bbox_embed(hs).sigmoid()
         out = {"pred_logits": outputs_class[-1], "pred_boxes": outputs_coord[-1]}

@@ -88,7 +88,7 @@ def get_args_parser():
     parser.add_argument('--ytvos_path', type=str)
     parser.add_argument('--remove_difficult', action='store_true')
 
-    parser.add_argument('--output_dir', default='/mnt/data/exps/r50_def_enc_VisTR',
+    parser.add_argument('--output_dir', default='/mnt/data/exps/r50_def_enc_RefVisTR',
                         help='path where to save, empty for no saving')
     parser.add_argument('--device', default='cuda',
                         help='device to use for training / testing')
