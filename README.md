@@ -60,9 +60,7 @@ python test.py
 Training of the model requires 4 GPU cards with each 15GB.
 
 To train baseline VisTR on a single node with 4 gpus for 60 epochs (Bsz 1), trains in 1 day 10:28 hrs:
-```
-python -m torch.distributed.launch --nproc_per_node=8 --use_env main.py --backbone resnet101/50 --ytvos_path /path/to/ytvos --masks --pretrained_weights /path/to/pretrained_path
-```
+
 ```
 python -m torch.distributed.launch --nproc_per_node=4 --use_env main.py --backbone resnet50 --ytvos_path /mnt/data/ytvis/ --masks --pretrained_weights ../VisTR/384_coco_r50.pth
 ```
