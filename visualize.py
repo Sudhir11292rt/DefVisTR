@@ -5,10 +5,10 @@ import cv2
 import os
 import numpy as np
 
-res_path = '/mnt/data/exps/r50_def_enc_RefVisTR/results_19.json'
+res_path = '/mnt/data/exps/r50_def_enc_Ref_multiquery/results_14.json'
 annotation_path = '/mnt/data/meta_expressions_rvos/valid/meta_expressions.json' #'/mnt/data/ytvis/annotations/instances_train_sub.json'#
 image_path = '/mnt/data/valid_VOS_pukka/JPEGImages/'
-out_path = '/mnt/data/Inference/Annotation'
+out_path = '/mnt/data/Visualize/RefVIS_Multiple'
 vis_thresh = 0.001
 
 annotation = json.load(open(annotation_path))
@@ -34,6 +34,8 @@ ct = 0
 for vid in videos.keys():
     #vid = video['id']
     ct = ct + 1
+    if ct > 100 :
+        break
     print('processing video {} ...'.format(ct))
     tracks = results[str(vid)]
     colors = []
@@ -41,8 +43,7 @@ for vid in videos.keys():
         colors.append(get_rand_color())
     expressions_ = videos[vid]['expressions']
     for im_id, image in enumerate(videos[vid]['frames']):
-        im = cv2.imread(os.path.join(image_path, vid, f'{image}.jpg'))
-        h, w, _ = im.shape
+        
         #print(f'im_id {im_id}')
         for track_id, track in enumerate(tracks):
             exp = expressions_[str(track_id)]["exp"]
@@ -55,6 +56,8 @@ for vid in videos.keys():
             #bbox_enc = track['boxes'][im_id]
             #except:
             #    break
+            im = cv2.imread(os.path.join(image_path, vid, f'{image}.jpg'))
+            h, w, _ = im.shape
             if mask_enc is not None:
                 #rint(f'mask not nnone')
                 mask_dec = mask_utils.decode(mask_enc)
@@ -73,5 +76,5 @@ for vid in videos.keys():
                 cv2.putText(im, str(cls)+'_'+str(round(score, 2))+'_'+str(exp), (x, y),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, colors[track_id], thickness=2, lineType=cv2.LINE_AA)
                     
-        im_name = vid + '_' + image + '.jpg'
-        cv2.imwrite(os.path.join(out_path, im_name), im)
+            im_name = vid + '_' + str(track_id) + '_' +image  +'.jpg'
+            cv2.imwrite(os.path.join(out_path, im_name), im)

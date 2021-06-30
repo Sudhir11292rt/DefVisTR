@@ -5,7 +5,7 @@ import cv2
 import os
 import numpy as np
 
-res_path = '/mnt/data/exps/r50_def_enc_RefVisTR/results_19.json'
+res_path = '/mnt/data/exps/r50_def_enc_Ref_multiquery/results_54.json'
 annotation_path = '/mnt/data/meta_expressions_rvos/valid/meta_expressions.json' #'/mnt/data/ytvis/annotations/instances_train_sub.json'#
 image_path = '/mnt/data/valid_VOS_pukka/JPEGImages/'
 out_path = '/mnt/data/Inference/Annotation'

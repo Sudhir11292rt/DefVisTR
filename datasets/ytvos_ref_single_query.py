@@ -63,7 +63,7 @@ class YTVOSDataset:
         target = self.prepare(img[0], target, inds, self.num_frames, self.ann_to_exp)
         if self._transforms is not None:
             img, target = self._transforms(img, target)
-        #print(f'target["boxes"] {(target["boxes"].shape)} target["labels"] {(target["labels"].shape)}') target["boxes"] torch.Size([144, 4]) target["labels"] torch.Size([144])
+        
         return torch.cat(img,dim=0), target
 
 
@@ -86,16 +86,6 @@ def convert_coco_poly_to_mask(segmentations, height, width):
         masks = torch.zeros((0, height, width), dtype=torch.uint8)
     return masks
 
-def prepare_exps (exp, tokenizer, max_tokens) :
-
-    attention_mask = [0] * max_tokens
-    padded_input_ids = [0] * max_tokens
-    tokenized = tokenizer(exp)
-    token_len = min(len(tokenized["input_ids"]), max_tokens-1)
-    padded_input_ids[:token_len] = tokenized["input_ids"][:token_len]
-    attention_mask[:token_len] = tokenized["attention_mask"][:token_len]
-    return torch.tensor(padded_input_ids).unsqueeze(0), torch.tensor(attention_mask).unsqueeze(0)
-    
 
 class ConvertCocoPolysToMask(object):
     def __init__(self, return_masks=False, tokenizer=None):
@@ -121,41 +111,38 @@ class ConvertCocoPolysToMask(object):
         exps_input_ids = []
         exps_attn_masks = []
         # add valid flag for bboxes
-        for i, ann in enumerate(anno):
-        #ann = anno[random.randint(0,len(anno)-1)]
-            exp = ann_to_exp[str(ann['id'])][0]
-            expressions.append(exp)
-            padded_input_ids_tensor, attention_mask_tensor = prepare_exps(exp, self.tokenizer, self.max_tokens) 
-            exps_input_ids.append(padded_input_ids_tensor)
-            exps_attn_masks.append(attention_mask_tensor)
-            for j in range(num_frames):
-                bbox = ann['bboxes'][frame_id-inds[j]]
-                areas = ann['areas'][frame_id-inds[j]]
-                segm = ann['segmentations'][frame_id-inds[j]]
-                clas = ann["category_id"]
-                # for empty boxes
-                if bbox is None:
-                    bbox = [0,0,0,0]
-                    areas = 0
-                    valid.append(0)
-                    clas = 0
-                else:
-                    valid.append(1)
-                crowd = ann["iscrowd"] if "iscrowd" in ann else 0
-                boxes.append(bbox)
-                area.append(areas)
-                segmentations.append(segm)
-                classes.append(clas)
-                iscrowd.append(crowd)
-        
-        # while(1) :
-        #     if len(expressions) >= 8 :
-        #         break
-        #     exp = ""
-        #     expressions.append(exp)
-        #     padded_input_ids_tensor, attention_mask_tensor = prepare_exps(exp, self.tokenizer, self.max_tokens) 
-        #     exps_input_ids.append(padded_input_ids_tensor)
-        #     exps_attn_masks.append(attention_mask_tensor)
+        #for i, ann in enumerate(anno):
+        ann = anno[random.randint(0,len(anno)-1)]
+        exp = ann_to_exp[str(ann['id'])][0]
+        expressions.append(exp)
+        attention_mask = [0] * self.max_tokens
+        padded_input_ids = [0] * self.max_tokens
+        tokenized = self.tokenizer(exp)
+        token_len = min(len(tokenized["input_ids"]), self.max_tokens-1)
+        padded_input_ids[:token_len] = tokenized["input_ids"][:token_len]
+        attention_mask[:token_len] = tokenized["attention_mask"][:token_len]
+        exps_input_ids.append(torch.tensor(padded_input_ids).unsqueeze(0))
+        exps_attn_masks.append(torch.tensor(attention_mask).unsqueeze(0))
+        for j in range(num_frames):
+            bbox = ann['bboxes'][frame_id-inds[j]]
+            areas = ann['areas'][frame_id-inds[j]]
+            segm = ann['segmentations'][frame_id-inds[j]]
+            clas = ann["category_id"]
+            # for empty boxes
+            if bbox is None:
+                bbox = [0,0,0,0]
+                areas = 0
+                valid.append(0)
+                clas = 0
+            else:
+                valid.append(1)
+            crowd = ann["iscrowd"] if "iscrowd" in ann else 0
+            boxes.append(bbox)
+            area.append(areas)
+            segmentations.append(segm)
+            classes.append(clas)
+            iscrowd.append(crowd)
+            
 
         # guard against no boxes via resizing
         boxes = torch.as_tensor(boxes, dtype=torch.float32).reshape(-1, 4)

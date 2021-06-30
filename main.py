@@ -57,7 +57,7 @@ def get_args_parser():
                         help="Number of attention heads inside the transformer's attentions")
     parser.add_argument('--num_frames', default=36, type=int,
                         help="Number of frames")
-    parser.add_argument('--num_queries', default=360, type=int,
+    parser.add_argument('--num_queries', default=72, type=int,
                         help="Number of query slots")
     parser.add_argument('--pre_norm', action='store_true')
 
@@ -88,7 +88,7 @@ def get_args_parser():
     parser.add_argument('--ytvos_path', type=str)
     parser.add_argument('--remove_difficult', action='store_true')
 
-    parser.add_argument('--output_dir', default='/mnt/data/exps/r50_def_enc_RefVisTR',
+    parser.add_argument('--output_dir', default='/mnt/data/exps/r50_def_enc_Ref_multiquery_PE',
                         help='path where to save, empty for no saving')
     parser.add_argument('--device', default='cuda',
                         help='device to use for training / testing')

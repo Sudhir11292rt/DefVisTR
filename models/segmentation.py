@@ -15,7 +15,7 @@ from .dcn.deform_conv import DeformConv
 
 import util.box_ops as box_ops
 from util.misc import NestedTensor, interpolate, nested_tensor_from_tensor_list
-
+from torch.utils import checkpoint 
 try:
     from panopticapi.utils import id2rgb, rgb2id
 except ImportError:
@@ -104,28 +104,36 @@ class VisTRsegm(nn.Module):
             _,c_f,h,w = features[i].tensors.shape
             features[i].tensors = features[i].tensors.reshape(bs_f, self.vistr.num_frames, c_f, h,w)
         n_f = self.vistr.num_queries//self.vistr.num_frames
-        outputs_seg_masks = []
         
-        # image level processing using box attention
-        for i in range(self.vistr.num_frames):
-            hs_f = hs[-1][:,i*n_f:(i+1)*n_f,:]
-            memory_f = memory[:,:,i,:].reshape(bs_f, c, s_h,s_w)
-            mask_f = mask[:,i,:].reshape(bs_f, s_h,s_w)
-            bbox_mask_f = self.bbox_attention(hs_f, memory_f, mask=mask_f)
-            seg_masks_f = self.mask_head(memory_f, bbox_mask_f, [features[2].tensors[:,i], features[1].tensors[:,i], features[0].tensors[:,i]])
-            outputs_seg_masks_f = seg_masks_f.view(bs_f, n_f, 24, seg_masks_f.shape[-2], seg_masks_f.shape[-1])
-            outputs_seg_masks.append(outputs_seg_masks_f)
-        frame_masks = torch.cat(outputs_seg_masks,dim=0)
-        outputs_seg_masks = []
+        all_hs = hs
+        #print(f'all_hs {all_hs.shape}')
+        all_outputs_seg_masks = []
+        for exp_id in range(hs[-1].shape[1]//self.vistr.num_queries) :
+            outputs_seg_masks = []
+            hs = all_hs[:,:,exp_id*self.vistr.num_queries:(exp_id+1)*self.vistr.num_queries, :]
+            # image level processing using box attention
+            for i in range(self.vistr.num_frames):
+                hs_f = hs[-1][:,i*n_f:(i+1)*n_f,:]
+                memory_f = memory[:,:,i,:].reshape(bs_f, c, s_h,s_w)
+                mask_f = mask[:,i,:].reshape(bs_f, s_h,s_w)
+                bbox_mask_f = self.bbox_attention(hs_f, memory_f, mask=mask_f) #checkpoint.checkpoint(self.bbox_attention, hs_f, memory_f, mask_f) #
+                feature_list = [features[2].tensors[:,i], features[1].tensors[:,i], features[0].tensors[:,i]]
+                seg_masks_f = self.mask_head(memory_f, bbox_mask_f, feature_list[0], feature_list[1], feature_list[2]) #checkpoint.checkpoint(self.mask_head, memory_f, bbox_mask_f, feature_list[0], feature_list[1], feature_list[2]) #
+                outputs_seg_masks_f = seg_masks_f.view(bs_f, n_f, 24, seg_masks_f.shape[-2], seg_masks_f.shape[-1])
+                outputs_seg_masks.append(outputs_seg_masks_f)
+            frame_masks = torch.cat(outputs_seg_masks,dim=0)
+            outputs_seg_masks = []
 
-        # instance level processing using 3D convolution
-        for i in range(frame_masks.size(1)):
-            mask_ins = frame_masks[:,i].unsqueeze(0)
-            mask_ins = mask_ins.permute(0,2,1,3,4)
-            outputs_seg_masks.append(self.insmask_head(mask_ins))
-        outputs_seg_masks = torch.cat(outputs_seg_masks,1).squeeze(0).permute(1,0,2,3)
-        outputs_seg_masks = outputs_seg_masks.reshape(1,self.vistr.num_queries,outputs_seg_masks.size(-2),outputs_seg_masks.size(-1))
-        out["pred_masks"] = outputs_seg_masks
+            # instance level processing using 3D convolution
+            for i in range(frame_masks.size(1)):
+                mask_ins = frame_masks[:,i].unsqueeze(0)
+                mask_ins = mask_ins.permute(0,2,1,3,4)
+                outputs_seg_masks.append(self.insmask_head(mask_ins))
+            outputs_seg_masks = torch.cat(outputs_seg_masks,1).squeeze(0).permute(1,0,2,3)
+            outputs_seg_masks = outputs_seg_masks.reshape(1,self.vistr.num_queries,outputs_seg_masks.size(-2),outputs_seg_masks.size(-1))
+            all_outputs_seg_masks.append(outputs_seg_masks)
+        out["pred_masks"] = torch.cat(all_outputs_seg_masks, dim=1)#.repeat(1,hs[-1].shape[1]//self.vistr.num_queries,1,1)
+        #print(f'out["pred_masks"] {out["pred_masks"].shape} out["pred_logits"] {out["pred_logits"].shape} out["pred_boxes"] {out["pred_boxes"].shape}')
         return out
 
 
@@ -170,7 +178,7 @@ class MaskHeadSmallConv(nn.Module):
                     nn.init.kaiming_uniform_(m.weight, a=1)
                     nn.init.constant_(m.bias, 0)
 
-    def forward(self, x: Tensor, bbox_mask: Tensor, fpns: List[Tensor]):
+    def forward(self, x: Tensor, bbox_mask: Tensor, fpns_0: Tensor, fpns_1: Tensor, fpns_2: Tensor):# List[Tensor]):
         x = torch.cat([_expand(x, bbox_mask.shape[1]), bbox_mask.flatten(0, 1)], 1)
 
         x = self.lay1(x)
@@ -180,7 +188,7 @@ class MaskHeadSmallConv(nn.Module):
         x = self.gn2(x)
         x = F.relu(x)
 
-        cur_fpn = self.adapter1(fpns[0])
+        cur_fpn = self.adapter1(fpns_0)
         if cur_fpn.size(0) != x.size(0):
             cur_fpn = _expand(cur_fpn, x.size(0) // cur_fpn.size(0))
         x = cur_fpn + F.interpolate(x, size=cur_fpn.shape[-2:], mode="nearest")
@@ -188,7 +196,7 @@ class MaskHeadSmallConv(nn.Module):
         x = self.gn3(x)
         x = F.relu(x)
 
-        cur_fpn = self.adapter2(fpns[1])
+        cur_fpn = self.adapter2(fpns_1)
         if cur_fpn.size(0) != x.size(0):
             cur_fpn = _expand(cur_fpn, x.size(0) // cur_fpn.size(0))
         x = cur_fpn + F.interpolate(x, size=cur_fpn.shape[-2:], mode="nearest")
@@ -196,7 +204,7 @@ class MaskHeadSmallConv(nn.Module):
         x = self.gn4(x)
         x = F.relu(x)
 
-        cur_fpn = self.adapter3(fpns[2])
+        cur_fpn = self.adapter3(fpns_2)
         if cur_fpn.size(0) != x.size(0):
             cur_fpn = _expand(cur_fpn, x.size(0) // cur_fpn.size(0))
         x = cur_fpn + F.interpolate(x, size=cur_fpn.shape[-2:], mode="nearest")
