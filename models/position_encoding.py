@@ -74,7 +74,7 @@ class PositionEmbeddingSine2D(nn.Module):
     def forward(self, tensors, mask  ):
         x = tensors
         mask = mask
-        #print(f'x {x.shape} mask {mask.shape}')
+        print(f' mask {mask.shape}')
         assert mask is not None
         not_mask = ~mask
         y_embed = not_mask.cumsum(1, dtype=torch.float32)

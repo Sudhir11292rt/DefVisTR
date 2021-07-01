@@ -34,8 +34,8 @@ class YTVOSDataset:
             self.vid_infos.append(info)
         self.img_ids = []
         for idx, vid_info in enumerate(self.vid_infos):
-            for frame_id in range(len(vid_info['filenames'])):
-                self.img_ids.append((idx, frame_id))
+            frame_id = random.randint(0,len(vid_info['filenames'])-1)
+            self.img_ids.append((idx, frame_id))
     def __len__(self):
         return len(self.img_ids)
 

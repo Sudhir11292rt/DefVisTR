@@ -41,15 +41,15 @@ class HungarianMatcher(nn.Module):
 
         #bs = len(targets[0]["labels"])//self.num_frames
         #print(f'outputs["pred_logits"] {outputs["pred_logits"].shape} {outputs["pred_boxes"].shape}') #outputs["pred_logits"] torch.Size([1, 360, 42]) torch.Size([1, 360, 4])
-        num_queries = 72
+        num_queries = 36
         outputs_pred_logits = outputs["pred_logits"].view(-1,num_queries,42)
         outputs_pred_boxes = outputs["pred_boxes"].view(-1,num_queries,4)
         bs = outputs_pred_logits.shape[0]
 
         new_targets = []
         #print(f'targets[0]["labels"] {len(targets[0]["labels"])} {len(targets[0]["labels"])}')
-        for gts_ct in range(len(targets[0]["labels"])//self.num_frames) :
-            new_targets.append({"labels" : targets[0]["labels"][gts_ct*36:(gts_ct+1)*36], "boxes" :targets[0]["boxes"][gts_ct*36:(gts_ct+1)*36, :], "valid" : targets[0]["valid"][gts_ct*36:(gts_ct+1)*36]})
+        for gts_ct in range(bs) :
+            new_targets.append({"labels" : targets[0]["labels"], "boxes" :targets[0]["boxes"], "valid" : targets[0]["valid"]})
             #print(new_targets[gts_ct])
         
         #targets = new_targets 
@@ -57,6 +57,7 @@ class HungarianMatcher(nn.Module):
         #new_targets.append(targets[0])
         #print(f'len(targets[0]["labels"]) {len(targets[0]["labels"])} targets[i]["labels"]  {len(new_targets)} bs {bs}')
         index_i,index_j = [],[]
+        new_cost = []
         for i in range(bs):
             #print(f'i --> {i}')
             out_prob = outputs_pred_logits[i].softmax(-1)
@@ -65,7 +66,7 @@ class HungarianMatcher(nn.Module):
             tgt_bbox = new_targets[i]["boxes"]
             tgt_valid = new_targets[i]["valid"]
             #print(f'tgt_ids {len(tgt_ids)}')
-            num_out = 2
+            num_out = 1
             num_tgt = len(tgt_ids)//self.num_frames
             out_prob_split = out_prob.reshape(self.num_frames,num_out,out_prob.shape[-1]).permute(1,0,2)
             out_bbox_split = out_bbox.reshape(self.num_frames,num_out,out_bbox.shape[-1]).permute(1,0,2).unsqueeze(1)
@@ -77,12 +78,18 @@ class HungarianMatcher(nn.Module):
             iou_cost = -1 * multi_iou(box_cxcywh_to_xyxy(out_bbox_split),box_cxcywh_to_xyxy(tgt_bbox_split)).mean(-1)
             #TODO: only deal with box and mask with empty target
             cost = self.cost_class*class_cost + self.cost_bbox*bbox_cost + self.cost_giou*iou_cost
-            out_i, tgt_i = linear_sum_assignment(cost.cpu())
-            #print(f'idx {i} len(out_i) {len(out_i)}')
-            for j in range(len(out_i)):
-                tgt_valid_ind_j = tgt_valid_split[tgt_i[j]].nonzero().flatten()
-                index_i.append(tgt_valid_ind_j*num_out + out_i[j] + i*num_queries)
-                index_j.append(tgt_valid_ind_j + tgt_i[j]* self.num_frames + 36*i)
+            new_cost.append(cost.unsqueeze(0))
+        cost = torch.cat(new_cost,dim=0)
+        #print(f'cost {cost.shape}')
+        cost_values, cost_indices = torch.max(cost, dim=1)
+        #print(f'cost_values {cost_values.shape} cost_indices {cost_indices}')
+        
+        out_i, tgt_i = linear_sum_assignment(cost_values.cpu())
+        #print(f'idx  len(out_i) {len(out_i)}')
+        for j in range(len(out_i)):
+            tgt_valid_ind_j = tgt_valid_split[tgt_i[j]].nonzero().flatten()
+            index_i.append(tgt_valid_ind_j*num_out +  int(cost_indices[0][j].item()) +out_i[j]*num_queries)
+            index_j.append(tgt_valid_ind_j + tgt_i[j]* self.num_frames )
         if index_i==[] or index_j==[]:
             indices.append((torch.tensor([]).long().to(out_prob.device),torch.tensor([]).long().to(out_prob.device)))
         else:

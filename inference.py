@@ -199,12 +199,16 @@ def main(args):
             outputs = model(img)
             # end of model inference
             logits, boxes, masks = outputs['pred_logits'].softmax(-1)[0,:,:-1], outputs['pred_boxes'][0], outputs['pred_masks'][0]
-            pred_masks =F.interpolate(masks.reshape(num_frames,num_ins,masks.shape[-2],masks.shape[-1]),(im.size[1],im.size[0]),mode="bilinear").sigmoid().cpu().detach().numpy()>0.5
-            pred_logits = logits.reshape(num_frames,num_ins,logits.shape[-1]).cpu().detach().numpy()
+            print(f'logits {logits.shape} mask {masks.shape}')
+            #logits = logits.view(num_frames,num_ins, -1)
+            #masks = masks.view(num_frames,num_ins, -1)
+            pred_masks =F.interpolate(masks.reshape(num_ins, num_frames,masks.shape[-2],masks.shape[-1]).permute(1,0,2,3),(im.size[1],im.size[0]),mode="bilinear").sigmoid().cpu().detach().numpy()>0.5
+            pred_logits = logits.reshape(num_ins, num_frames,logits.shape[-1]).permute(1,0,2).cpu().detach().numpy()
             pred_masks = pred_masks[:length] 
             pred_logits = pred_logits[:length]
             pred_scores = np.max(pred_logits,axis=-1)
             pred_logits = np.argmax(pred_logits,axis=-1)
+            
             for m in range(num_ins):
                 if pred_masks[:,m].max()==0:
                     continue

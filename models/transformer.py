@@ -24,7 +24,7 @@ class Transformer(nn.Module):
     def __init__(self, d_model=512, nhead=8, num_encoder_layers=6,
                  num_decoder_layers=6, dim_feedforward=2048, dropout=0.1,
                  activation="relu", normalize_before=False,
-                 return_intermediate_dec=False, freeze_text_encoder = True, ref_exp=True):
+                 return_intermediate_dec=False, freeze_text_encoder = True, ref_exp=False):
         super().__init__()
         self.d_model = d_model
         self.nhead = nhead
@@ -35,9 +35,10 @@ class Transformer(nn.Module):
         enc_n_points=6
         dropout = 0.1
         num_feature_levels = 36
+        self.no_of_exps, self.id_dim  = 8, 20
 
-        if ref_exp :
-            num_feature_levels = num_feature_levels + 1
+        num_feature_levels = num_feature_levels + 1
+        
 
         encoder_layer = DeformableTransformerEncoderLayer(d_model, dim_feedforward,
                                                           dropout, activation,
@@ -54,13 +55,16 @@ class Transformer(nn.Module):
         decoder_norm = nn.LayerNorm(d_model)
         self.decoder = TransformerDecoder(decoder_layer, num_decoder_layers, decoder_norm,
                                           return_intermediate=return_intermediate_dec)
+        self.instance_encoders = nn.Embedding(self.id_dim*self.no_of_exps, d_model)
         self.txt_pos = PositionEmbeddingSine2D(d_model//2, normalize=True)
 
+        self.no_of_exps
         self._reset_parameters()
 
         if ref_exp :
             self.tokenizer = RobertaTokenizerFast.from_pretrained('roberta-base')
             self.text_encoder = RobertaModel.from_pretrained('roberta-base')
+            
 
             if freeze_text_encoder:
                 for p in self.text_encoder.parameters():
@@ -112,8 +116,9 @@ class Transformer(nn.Module):
         query_embed = query_embed.unsqueeze(1).repeat(1, bs, 1) #query_embed.unsqueeze(1).repeat(1, bs, 1)
         mask = mask.flatten(1)
 
+        device = src.device
         if self.ref_exp :
-            device = src.device
+            
             no_of_exps = exps_input_ids.shape[0]
             #print(f'exps_input_ids {exps_input_ids.shape} exps_attn_masks {exps_attn_masks.shape}') #exps_input_ids torch.Size([1, 20]) exps_attn_masks torch.Size([1, 20]) # multi - exps_input_ids torch.Size([4, 20]) exps_attn_masks torch.Size([4, 20])
             tokenized = {"input_ids":(exps_input_ids.to(device)), "attention_mask":exps_attn_masks.to(device)}
@@ -126,23 +131,25 @@ class Transformer(nn.Module):
             #print(f'text_attention_mask {text_attention_mask.shape}') # text_attention_mask torch.Size([1, 20]) # multi - text_attention_mask torch.Size([4, 20])
             text_memory_resized = self.resizer(text_memory) #text_memory_resized torch.Size([20, 1, 384])
             #print(f' Refsrc {src.shape} mask {mask.shape} pos_embed {pos_embed.shape}') #src torch.Size([4680, 1, 384]) mask torch.Size([1, 4680]) pos_embed torch.Size([4680, 1, 384])
-            src = torch.cat([src, text_memory_resized.view(-1,1, 384)], dim=0)
-            mask = torch.cat([mask, text_attention_mask.view(1, -1)], dim=1)
-            txt_pos_encoding = self.txt_pos(text_memory_resized, text_attention_mask.unsqueeze(0))
-            #print(f'txt_pos {txt_pos_encoding.shape}') # txt_pos torch.Size([1, 384, 8, 20])
-            pos_embed = torch.cat([pos_embed, txt_pos_encoding.permute(0,2,3,1).view(-1,1,384) ], dim=0)
-            #print(f'src {src.shape} mask {mask.shape} pos_embed {pos_embed.shape}')
+        instance_attn_mask = torch.zeros(self.no_of_exps, self.id_dim).to(device).bool()
+        src = torch.cat([src, self.instance_encoders.weight.unsqueeze(1)], dim=0)
+        mask = torch.cat([mask, instance_attn_mask.view(1, -1)], dim=1)
+        txt_pos_encoding = self.txt_pos(self.instance_encoders.weight, instance_attn_mask.unsqueeze(0))
+        #print(f'txt_pos {txt_pos_encoding.shape}') # txt_pos torch.Size([1, 384, 8, 20])
+        pos_embed = torch.cat([pos_embed, txt_pos_encoding.permute(0,2,3,1).view(-1,1,384) ], dim=0)
+        #print(f'src {src.shape} mask {mask.shape} pos_embed {pos_embed.shape}')
 
-            #for idd in range(exps_input_ids.shape[0]) :
-            spatial_shapes.append((exps_input_ids.shape[0],exps_input_ids.shape[1]))
-            masks_.append(exps_attn_masks.unsqueeze(0))
+        #for idd in range(exps_input_ids.shape[0]) :
+        spatial_shapes.append((self.no_of_exps,self.id_dim))
+        masks_.append(instance_attn_mask.unsqueeze(0))
 
         spatial_shapes = torch.as_tensor(spatial_shapes, dtype=torch.long, device=src.device)
         level_start_index = torch.cat((spatial_shapes.new_zeros((1, )), spatial_shapes.prod(1).cumsum(0)[:-1]))
         valid_ratios = torch.stack([self.get_valid_ratio(m) for m in masks_], 1)
 
         tgt = torch.zeros_like(query_embed)
-        memory = self.encoder(src.permute(1,0,2), spatial_shapes, level_start_index, valid_ratios, pos_embed.permute(1,0,2), mask) #self.encoder(src, src_key_padding_mask=mask, pos=pos_embed)
+        memory = checkpoint.checkpoint(self.encoder,src.permute(1,0,2), spatial_shapes, level_start_index, valid_ratios, pos_embed.permute(1,0,2), mask)
+        #self.encoder(src.permute(1,0,2), spatial_shapes, level_start_index, valid_ratios, pos_embed.permute(1,0,2), mask) #self.encoder(src, src_key_padding_mask=mask, pos=pos_embed)
         memory = memory.permute(1,0,2)
         # hs_exps = []
         # print(f'text_memory_resized {text_memory_resized.shape}')
@@ -156,14 +163,14 @@ class Transformer(nn.Module):
         #     hs_exps.append(hs)
         # hs = torch.cat(hs_exps, dim=1)
         #print(f'no_of_exps {no_of_exps}')
-        no_of_exps_tensor = torch.tensor(no_of_exps).to(device)
+        no_of_exps_tensor = torch.tensor(self.no_of_exps).to(device)
         #print(f'tgt {tgt.shape} query_pos {query_embed.shape}') tgt torch.Size([360, 1, 384]) query_pos torch.Size([360, 1, 384])
         hs = self.decoder(tgt, memory, memory_key_padding_mask=mask,
                              pos=pos_embed, query_pos=query_embed, no_of_exps=no_of_exps_tensor)
         hs = hs.view(6, -1, 1, 384)
         #print(f'memory {memory.shape}') memory torch.Size([4680, 1, 384])
-        if self.ref_exp :
-            memory = memory[:-text_memory_resized.shape[0]*text_memory_resized.shape[1],:,:]
+        #if self.ref_exp :
+        memory = memory[:-self.no_of_exps*self.id_dim,:,:]
         #print(f'memory {memory.shape}') #memory torch.Size([4680, 1, 384])
         #print(f'hs {hs.shape} memory {memory.shape}') #hs torch.Size([6, 360, 1, 384]) memory torch.Size([4680, 1, 384])
         return hs.transpose(1, 2), memory.permute(1, 2, 0).view(bs, c, h, w)
@@ -333,38 +340,38 @@ class TransformerDecoderLayer(nn.Module):
             tgt = tgt.repeat(1, no_of_exps, 1)
         query_pos = query_pos.repeat(1, no_of_exps, 1)
         word_length = 20
-        list_memory, list_memory_key_padding_mask, list_pos = [], [], []
+        
+        tgt_all, query_pos_all, tgt_mask_all, tgt_key_padding_mask_all = tgt, query_pos, tgt_mask, tgt_key_padding_mask
+        final_target_all = []
         sub_memory = memory[:-word_length*no_of_exps,:,:]
         for each_exp in range(no_of_exps) :
-            #print(f'range {-word_length*(no_of_exps-each_exp)} {-word_length*(no_of_exps-each_exp-1)} {memory[:-word_length*no_of_exps,:,:].shape} {memory[sub_memory.shape[0] + word_length*(each_exp): sub_memory.shape[0] +word_length*(each_exp+1), :, :].shape}')
+
+            tgt, query_pos, tgt_mask, tgt_key_padding_mask = tgt_all[:, each_exp:each_exp+1, :], query_pos_all[:, each_exp:each_exp+1, :], tgt_mask_all, tgt_key_padding_mask_all
+            #print(f' tgt {tgt.shape} memory {memory.shape}  memory_key_padding_mask {memory_key_padding_mask.shape} pose {pos.shape} query_pos {query_pos.shape} ')
+            q = k = self.with_pos_embed(tgt, query_pos)
+            tgt2 = self.self_attn(q, k, value=tgt, attn_mask=tgt_mask,
+                                    key_padding_mask=tgt_key_padding_mask)[0]
+            tgt = tgt + self.dropout1(tgt2)
+            tgt = self.norm1(tgt)
+            #for _ in range(3) :
+            
+                #print(f'range {-word_length*(no_of_exps-each_exp)} {-word_length*(no_of_exps-each_exp-1)} {memory[:-word_length*no_of_exps,:,:].shape} {memory[sub_memory.shape[0] + word_length*(each_exp): sub_memory.shape[0] +word_length*(each_exp+1), :, :].shape}')
             new_memory = torch.cat([sub_memory, memory[sub_memory.shape[0] + word_length*(each_exp):sub_memory.shape[0] +word_length*(each_exp+1),:,:]], dim=0)
             new_memory_key_padding_mask =  torch.cat([memory_key_padding_mask[:,:-word_length*no_of_exps], memory_key_padding_mask[:, sub_memory.shape[0] + word_length*(each_exp): sub_memory.shape[0] +word_length*(each_exp+1)]], dim=1)
             new_pos = torch.cat([pos[:-word_length*no_of_exps,:,:], pos[sub_memory.shape[0] + word_length*(each_exp): sub_memory.shape[0] +word_length*(each_exp+1),:,:]], dim=0)
-            list_memory.append(new_memory); list_memory_key_padding_mask.append(new_memory_key_padding_mask); list_pos.append(new_pos)
-            #print(f'new_memory {new_memory.shape} new_memory_key_padding_mask {new_memory_key_padding_mask.shape} new_pos {new_pos.shape}')
-        memory = torch.cat(list_memory,dim=1); memory_key_padding_mask = torch.cat(list_memory_key_padding_mask, dim=0); pos = torch.cat(list_pos, dim=1)
-        #memory = memory.repeat(1,no_of_exps,1)
-        #memory_key_padding_mask = memory_key_padding_mask.repeat(no_of_exps, 1)
-        #pos = pos.repeat(1, no_of_exps, 1)
-        
-        #print(f' tgt {tgt.shape} memory {memory.shape}  memory_key_padding_mask {memory_key_padding_mask.shape} pose {pos.shape} query_pos {query_pos.shape} ')
-        q = k = self.with_pos_embed(tgt, query_pos)
-        tgt2 = self.self_attn(q, k, value=tgt, attn_mask=tgt_mask,
-                              key_padding_mask=tgt_key_padding_mask)[0]
-        tgt = tgt + self.dropout1(tgt2)
-        tgt = self.norm1(tgt)
-        #for _ in range(3) :
-        tgt2 = self.multihead_attn(query=self.with_pos_embed(tgt, query_pos),
-                                key=self.with_pos_embed(memory, pos),
-                                value=memory, attn_mask=memory_mask,
-                                key_padding_mask=memory_key_padding_mask)[0]
-        tgt = tgt + self.dropout2(tgt2)
-        tgt = self.norm2(tgt)
-        tgt2 = self.linear2(self.dropout(self.activation(self.linear1(tgt))))
-        tgt = tgt + self.dropout3(tgt2)
-        tgt = self.norm3(tgt)
+            tgt2 = self.multihead_attn(query=self.with_pos_embed(tgt, query_pos),
+                                    key=self.with_pos_embed(new_memory, new_pos),
+                                    value=new_memory, attn_mask=memory_mask,
+                                    key_padding_mask=new_memory_key_padding_mask)[0]
+            
+            tgt = tgt + self.dropout2(tgt2)
+            tgt = self.norm2(tgt)
+            tgt2 = self.linear2(self.dropout(self.activation(self.linear1(tgt))))
+            tgt = tgt + self.dropout3(tgt2)
+            tgt = self.norm3(tgt)
+            final_target_all.append(tgt)
 
-        return tgt
+        return torch.cat(final_target_all, dim=1)
 
     def forward_pre(self, tgt, memory,
                     tgt_mask: Optional[Tensor] = None,
@@ -378,30 +385,37 @@ class TransformerDecoderLayer(nn.Module):
             tgt = tgt.repeat(1, no_of_exps, 1)
         query_pos = query_pos.repeat(1, no_of_exps, 1)
         word_length = 20
-        list_memory, list_memory_key_padding_mask, list_pos = [], [], []
+
+        tgt_all, query_pos_all, tgt_mask_all, tgt_key_padding_mask_all = tgt, query_pos, tgt_mask, tgt_key_padding_mask
+        final_target_all = []
+        sub_memory = memory[:-word_length*no_of_exps,:,:]
         for each_exp in range(no_of_exps) :
-            new_memory = torch.cat([memory[:-word_length*no_of_exps,:,:], memory[-word_length*(no_of_exps-each_exp):-word_length*(no_of_exps-each_exp-1),:,:]], dim=0)
-            new_memory_key_padding_mask =  torch.cat([memory_key_padding_mask[:,:-word_length*no_of_exps], memory_key_padding_mask[:, -word_length*(no_of_exps-each_exp):-word_length*(no_of_exps-each_exp-1)]], dim=1)
-            new_pos = torch.cat([pos[:-word_length*no_of_exps,:,:], pos[-word_length*(no_of_exps-each_exp):-word_length*(no_of_exps-each_exp-1),:,:]], dim=0)
-            list_memory.append(new_memory); list_memory_key_padding_mask.append(new_memory_key_padding_mask); list_pos.append(new_pos)
-        memory = torch.cat(list_memory,dim=1); memory_key_padding_mask = torch.cat(list_memory_key_padding_mask, dim=0); pos = torch.cat(list_pos, dim=1)
-        print(f' tgt {tgt.shape} memory {memory.shape}  memory_key_padding_mask {memory_key_padding_mask.shape} pose {pos.shape} query_pos {query_pos.shape} ')
-        tgt2 = self.norm1(tgt)
-        q = k = self.with_pos_embed(tgt2, query_pos)
-        tgt2 = self.self_attn(q, k, value=tgt2, attn_mask=tgt_mask,
-                              key_padding_mask=tgt_key_padding_mask)[0]
-        tgt = tgt + self.dropout1(tgt2)
-        tgt2 = self.norm2(tgt)
+            tgt, query_pos, tgt_mask, tgt_key_padding_mask = tgt_all[:, each_exp:each_exp+1, :], query_pos_all[:, each_exp:each_exp+1, :], tgt_mask_all, tgt_key_padding_mask_all
+            
+            tgt2 = self.norm1(tgt)
+            q = k = self.with_pos_embed(tgt2, query_pos)
+            tgt2 = self.self_attn(q, k, value=tgt2, attn_mask=tgt_mask,
+                                key_padding_mask=tgt_key_padding_mask)[0]
+            tgt = tgt + self.dropout1(tgt2)
+            tgt2 = self.norm2(tgt)
+
+            new_memory = torch.cat([sub_memory, memory[sub_memory.shape[0] + word_length*(each_exp):sub_memory.shape[0] +word_length*(each_exp+1),:,:]], dim=0)
+            new_memory_key_padding_mask =  torch.cat([memory_key_padding_mask[:,:-word_length*no_of_exps], memory_key_padding_mask[:, sub_memory.shape[0] + word_length*(each_exp): sub_memory.shape[0] +word_length*(each_exp+1)]], dim=1)
+            new_pos = torch.cat([pos[:-word_length*no_of_exps,:,:], pos[sub_memory.shape[0] + word_length*(each_exp): sub_memory.shape[0] +word_length*(each_exp+1),:,:]], dim=0)
+            tgt2 = self.multihead_attn(query=self.with_pos_embed(tgt, query_pos),
+                                    key=self.with_pos_embed(new_memory, new_pos),
+                                    value=new_memory, attn_mask=memory_mask,
+                                    key_padding_mask=new_memory_key_padding_mask)[0]
         #for _ in range(3) :
-        tgt2 = self.multihead_attn(query=self.with_pos_embed(tgt, query_pos),
-                                key=self.with_pos_embed(memory, pos),
-                                value=memory, attn_mask=memory_mask,
-                                key_padding_mask=memory_key_padding_mask)[0]
-        tgt = tgt + self.dropout2(tgt2)
-        tgt2 = self.norm3(tgt)
-        tgt2 = self.linear2(self.dropout(self.activation(self.linear1(tgt2))))
-        tgt = tgt + self.dropout3(tgt2)
-        return tgt
+        
+            tgt = tgt + self.dropout2(tgt2)
+            tgt2 = self.norm3(tgt)
+            tgt2 = self.linear2(self.dropout(self.activation(self.linear1(tgt2))))
+            tgt = tgt + self.dropout3(tgt2)
+            final_target_all.append(tgt)
+
+        return torch.cat(final_target_all, dim=1)
+
 
     def forward(self, tgt, memory,
                 tgt_mask: Optional[Tensor] = None,
